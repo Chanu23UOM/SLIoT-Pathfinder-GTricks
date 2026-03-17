@@ -1,3 +1,4 @@
+// [CRITICAL] REPLACE THIS WITH YOUR EXACT EDGE IMPULSE LIBRARY NAME:
 #include <vithanagesvch-project-1_inferencing.h>
 
 #include <WiFi.h>
@@ -10,10 +11,19 @@
 #include <SPI.h>
 #include <LoRa.h>
 
+// --- Custom I2C Pin Definitions ---
+#define I2C_SDA 32
+#define I2C_SCL 33
+
 // --- LoRa Pin Definitions (ESP32) ---
 #define LORA_SS    15 
 #define LORA_RST   16 
 #define LORA_DIO0  0  
+
+// --- Hardware Button Definition ---
+#define SOS_BUTTON_PIN 14 
+unsigned long lastButtonPress = 0;
+const unsigned long buttonCooldown = 2000; 
 
 // --- Network Settings ---
 const byte DNS_PORT = 53;
@@ -37,13 +47,14 @@ bool hasLoRa = false;
 bool simulatedAlertActive = false; 
 unsigned long lastAlertTime = 0;
 
-// --- Edge AI Inference Variables ---
+// --- Edge AI & Sensor Variables ---
 float features[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
 size_t feature_ix = 0;
 unsigned long lastSampleTime = 0;
 bool simulateElephant = false; 
 float sim_time = 0.0;
 float baseline_Z = 0.0;
+float mpu_temperature = 0.0; 
 
 // --- HTML Interface (Stored in PROGMEM) ---
 const char index_html[] PROGMEM = R"rawliteral(
@@ -248,7 +259,16 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n[INIT] Starting Pathfinder Edge AI Node...");
+
+  // --- Initialize Custom I2C Bus ---
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Serial.println("[INIT] I2C Bus re-routed to SDA: 32, SCL: 33.");
+
+  // --- Hardware Button Initialization ---
+  pinMode(SOS_BUTTON_PIN, INPUT_PULLUP);
+  Serial.println("[INIT] Physical SOS Button configured on GPIO 14 (Internal Pull-Up).");
   
+  // --- Sensor Initialization ---
   if (!mpu.begin()) { 
     Serial.println("[WARN] MPU6050 unavailable. Initiating synthetic AI mode."); 
     hasMPU = false;
@@ -258,6 +278,7 @@ void setup() {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
     baseline_Z = a.acceleration.z;
+    mpu_temperature = temp.temperature; 
     Serial.println("[INIT] MPU6050 connected and calibrated.");
   }
   
@@ -269,6 +290,7 @@ void setup() {
     Serial.println("[INIT] BME280 connected.");
   }
 
+  // --- LoRa Initialization ---
   LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
   if (!LoRa.begin(433E6)) { 
     Serial.println("[WARN] LoRa module failed. Transmissions routed to Serial only."); 
@@ -278,11 +300,13 @@ void setup() {
     Serial.println("[INIT] LoRa module connected.");
   }
 
+  // --- Wi-Fi Captive Portal Setup ---
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP("Pathfinder-Net"); 
   dnsServer.start(DNS_PORT, "*", apIP);
 
+  // --- Web Server Endpoints ---
   server.on("/", HTTP_GET, []() { server.send(200, "text/html", index_html); });
   
   server.on("/sensordata", HTTP_GET, []() {
@@ -290,7 +314,16 @@ void setup() {
     json += "\"address\":\"" + NODE_ADDRESS + "\",";
     json += "\"lat\":\"" + NODE_LAT + "\",";
     json += "\"lon\":\"" + NODE_LON + "\",";
-    json += "\"temperature\":\"" + String(hasBME ? bme.readTemperature() : (24.0 + random(0, 30)/10.0), 1) + "\",";
+    
+    // Uses MPU6050 temperature if BME280 is not available
+    if (hasBME) {
+        json += "\"temperature\":\"" + String(bme.readTemperature(), 1) + "\",";
+    } else if (hasMPU) {
+        json += "\"temperature\":\"" + String(mpu_temperature, 1) + "\",";
+    } else {
+        json += "\"temperature\":\"" + String(24.0 + random(0, 30)/10.0, 1) + "\","; // Mock
+    }
+
     json += "\"humidity\":\"" + String(hasBME ? bme.readHumidity() : (60.0 + random(0, 10)), 0) + "\",";
     json += "\"pressure\":\"" + String(hasBME ? (bme.readPressure() / 100.0F) : (1010.0 + random(-5, 5)), 1) + "\",";
     json += "\"alert\":\"" + String(simulatedAlertActive ? 1 : 0) + "\"";
@@ -302,7 +335,7 @@ void setup() {
   });
 
   server.on("/trigger_sos", HTTP_GET, []() {
-    Serial.println("[EVENT] Virtual SOS Triggered via User Interface.");
+    Serial.println("[EVENT] Web UI: Virtual SOS Triggered.");
     sendLoRaAlert("VIRTUAL_SOS");
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "text/plain", "SOS Transmitted");
@@ -315,18 +348,53 @@ void setup() {
     server.send(200, "text/plain", "Alert Triggered");
   });
 
+  // --- CAPTIVE PORTAL REDIRECTION LOGIC ---
+  server.on("/generate_204", HTTP_GET, []() {
+      server.sendHeader("Location", String("http://") + apIP.toString(), true);
+      server.send(302, "text/plain", "");
+  });
+
+  server.on("/hotspot-detect.html", HTTP_GET, []() {
+      server.sendHeader("Location", String("http://") + apIP.toString(), true);
+      server.send(302, "text/plain", "");
+  });
+
   server.onNotFound([]() {
-    server.sendHeader("Location", String("http://") + apIP.toString(), true);
-    server.send(302, "text/plain", "");
+      if (server.client().localIP() != server.client().remoteIP()) {
+          server.sendHeader("Location", String("http://") + apIP.toString(), true);
+          server.send(302, "text/plain", ""); 
+      } else {
+          server.send(404, "text/plain", "404: Not Found");
+      }
   });
 
   server.begin();
-  Serial.println("[SYS] System Ready. Awaiting client connections on 'Pathfinder-Net'");
+  Serial.println("[SYS] System Ready. Captive Portal Active on 'Pathfinder-Net'");
 }
 
 void loop() {
   dnsServer.processNextRequest();
   server.handleClient();
+
+  // --- TELEMETRY DEBUG PRINT (Runs every 2 seconds) ---
+  static unsigned long lastTelemetryPrint = 0;
+  if (millis() - lastTelemetryPrint > 2000) {
+      if (hasMPU) {
+          Serial.print("[TELEMETRY] MPU6050 Temperature: ");
+          Serial.print(mpu_temperature);
+          Serial.println(" C");
+      }
+      lastTelemetryPrint = millis();
+  }
+
+  // --- HARDWARE SOS BUTTON LOGIC (IMMEDIATE TRIGGER) ---
+  int buttonReading = digitalRead(SOS_BUTTON_PIN);
+  
+  if (buttonReading == LOW && (millis() - lastButtonPress > buttonCooldown)) {
+      Serial.println("\n[CRITICAL EVENT] Physical SOS Button Actuated!");
+      sendLoRaAlert("HARDWARE_SOS_TRIGGERED");
+      lastButtonPress = millis(); 
+  }
 
   // --- EDGE AI INFERENCE PIPELINE (Runs exactly at 100Hz) ---
   if (millis() - lastSampleTime >= 10) {
@@ -335,16 +403,18 @@ void loop() {
 
     // 1. Data Acquisition Routing
     if (simulateElephant) {
-        // UI-Triggered Synthetic Target Data (20Hz)
         sim_time += 0.01;
         current_Z = 3.0 * sin(2 * PI * 20.0 * sim_time) + random(-10, 10)/100.0;
     } else if (hasMPU) {
-        // Real Hardware Sensor Data
+        // Read actual sensor data
         sensors_event_t a, g, temp;
         mpu.getEvent(&a, &g, &temp);
+        
         current_Z = a.acceleration.z - baseline_Z;
+        
+        // Update the global temperature variable for the Web Portal and Serial Debug
+        mpu_temperature = temp.temperature;
     } else {
-        // Synthetic Ambient Noise (when no hardware and no simulation is triggered)
         current_Z = random(-10, 10) / 100.0;
     }
 
@@ -361,23 +431,21 @@ void loop() {
 
         // 4. Evaluate Output Probabilities
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-            // Ensure the exact string here matches your Edge Impulse label (e.g., "Elephant")
             if (String(result.classification[ix].label) == "Elephant" && result.classification[ix].value > 0.80) {
                 
-                // Alert Cooldown (Prevents network spamming)
+                // Alert Cooldown
                 if (millis() - lastAlertTime > 5000) {
-                    Serial.print("[ALERT] Target signature detected with confidence: ");
+                    Serial.print("\n[ALERT] Target signature detected with confidence: ");
                     Serial.println(result.classification[ix].value);
                     
                     simulatedAlertActive = true;
                     sendLoRaAlert("AI_SEISMIC_TARGET_DETECTED");
-                    simulateElephant = false; // Reset simulation state
+                    simulateElephant = false; 
                     lastAlertTime = millis();
                 }
             }
         }
-        
-        feature_ix = 0; // Reset buffer for next inference window
+        feature_ix = 0; 
     }
   }
 }
