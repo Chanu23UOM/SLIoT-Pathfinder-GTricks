@@ -23,7 +23,7 @@ In remote adventure tourism, hikers enter "Digital Blind Spots" where 4G/5G fail
 | *Hardware Setup* | *Elephant Footfall Detection* |
 
 ### More Gallery
-[Field Testing](images/03.jpeg)
+![Field Testing](images/03.jpeg)  | ![''](images/04.jpeg) |
 *Pathfinder Smart Post in action*
 
 ## Team GTricks
