@@ -16,6 +16,16 @@ In remote adventure tourism, hikers enter "Digital Blind Spots" where 4G/5G fail
 * `/data-generation` - Python scripts for creating synthetic HIL (Hardware-in-the-Loop) training data.
 * `/docs` - Strategic blueprints and pitch materials.
 
+## Development Progress 🚧
+| Phase 1: Prototyping | Phase 2: Edge AI Testing |
+|:---:|:---:|
+| ![Initial Assembly](images/01.jpeg) | ![TinyML Testing](images/02.jpeg) |
+| *Hardware Setup* | *Elephant Footfall Detection* |
+
+### More Gallery
+[Field Testing](images/03.jpeg)
+*Pathfinder Smart Post in action*
+
 ## Team GTricks
 * **S.V.C. Hansaja Vithanage** (Technology Lead)
 * **Senuja Dilmith Geeganage** (Entrepreneurship Lead)
